@@ -1,0 +1,261 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    # The changes job below cannot filter push events (see its comment), so the
+    # docs-only skip for main is expressed at the trigger instead. This is an
+    # allowlist: a push runs CI only if it touches a path that can affect the
+    # build. Trade-off: a NEW kind of build-affecting file (a new config or
+    # tooling file) does NOT trigger CI until its pattern is added here and to the
+    # changes job's `code` filter -- add the pattern in the same PR that adds the
+    # file. Keep this list identical to that filter; verify-path-allowlists-sync
+    # enforces it.
+    paths:
+      - "src/**"
+      - "tests/**"
+      - ".githooks/**"
+      - ".github/workflows/**"
+      - ".github/scripts/**"
+      - "**/*.csproj"
+      - "**/*.props"
+      - "**/*.targets"
+      - "**/*.sln"
+      - "**/*.slnx"
+      - "global.json"
+      - "nuget.config"
+      - ".editorconfig"
+      - "coverlet.runsettings"
+      - "Directory.Build.rsp"
+      - ".config/dotnet-tools.json"
+      - ".globalconfig"
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ github.event_name != 'pull_request' && 'true' || steps.filter.outputs.code }}
+
+    steps:
+      # Docs- and spec-only PRs skip the build entirely. The filter still runs
+      # (and still reports a status), so a required check never hangs.
+      #
+      # Allowlist: only the paths below can change build or test output, so
+      # everything else (markdown, docs/, openspec/, LICENSE, unrecognized config)
+      # is docs-only. A new build-affecting file type is NOT built until its
+      # pattern is added here and to on.push.paths above, so add the pattern in
+      # the same PR that introduces the file.
+      #
+      # PR-only: on pull_request the action diffs via the GitHub API and needs no
+      # working tree. On push/workflow_dispatch it would shell out to git (no
+      # checkout here) and, on main, diff the default branch against itself and
+      # report no changes -- so those events skip the filter and always build.
+      - name: Detect code changes
+        id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3
+        with:
+          filters: |
+            code:
+              - "src/**"
+              - "tests/**"
+              - ".githooks/**"
+              - ".github/workflows/**"
+              - ".github/scripts/**"
+              - "**/*.csproj"
+              - "**/*.props"
+              - "**/*.targets"
+              - "**/*.sln"
+              - "**/*.slnx"
+              - "global.json"
+              - "nuget.config"
+              - ".editorconfig"
+              - "coverlet.runsettings"
+              - "Directory.Build.rsp"
+              - ".config/dotnet-tools.json"
+              - ".globalconfig"
+
+  # Always runs (no `needs`/`if` on the code filter). The two path lists above are
+  # hand-duplicated; if this job were gated on the filter, dropping an entry from
+  # only the filter would make the guard skip itself.
+  verify-path-allowlists-sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Verify push paths and code filter match
+        run: sh .github/scripts/verify-path-allowlists-sync.sh
+
+      - name: Test the sync verifier
+        run: sh .github/scripts/test-verify-path-allowlists-sync.sh
+
+  build:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup .NET 10.0
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Restore dependencies
+        run: dotnet restore "TaskFlow.slnx"
+
+      - name: Build solution
+        run: dotnet build "TaskFlow.slnx" --configuration Release --no-restore
+
+      # Tests run here only for PRs from forks. A fork PR cannot read SONAR_TOKEN,
+      # so the sonarqube-analysis job (which runs the same tests with coverage) is
+      # skipped for it -- this step is the fallback so fork PRs are still tested.
+      # Same-repo PRs and pushes get their test run from sonarqube-analysis instead
+      # of running the suite twice.
+      - name: Run tests
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        run: dotnet test "TaskFlow.slnx" --configuration Release --no-build --verbosity normal
+
+  workflow-lint:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    env:
+      # Pinned by version and checksum. actionlint has no first-party action, and its
+      # documented install path pipes a remote script into bash -- an unpinned third party
+      # in the build. Bump both values together; the hash is from the release's
+      # checksums.txt (actionlint_<version>_checksums.txt on the release page).
+      ACTIONLINT_VERSION: "1.7.12"
+      ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Install actionlint
+        run: |
+          url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          # --proto governs the initial request only; --proto-redir is what keeps a
+          # redirect from downgrading the download to plain HTTP. Both are needed with
+          # --location (SonarCloud githubactions:S6506). The checksum below still owns
+          # integrity -- this closes the tamperable hop ahead of it.
+          curl --silent --show-error --location --fail --max-time 120 \
+            --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --output actionlint.tar.gz "$url"
+          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum --check --strict
+          tar -xzf actionlint.tar.gz actionlint
+          sudo mv actionlint /usr/local/bin/
+
+      # actionlint runs shellcheck over every `run:` block, but only if shellcheck is on
+      # PATH -- otherwise it silently skips that half of the check. The runner image ships
+      # it; assert that here so the day it stops shipping is a failure, not a quiet
+      # downgrade.
+      - name: Verify shellcheck is present
+        run: shellcheck --version
+
+      - name: Lint workflows
+        run: actionlint -color
+
+      # Scripts under .github/scripts live outside any `run:` block, so actionlint does
+      # not reach them.
+      - name: Lint shell scripts
+        run: shellcheck .github/scripts/*.sh .githooks/*
+
+  sonarqube-analysis:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [changes, build]
+    if: needs.changes.outputs.code == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    permissions:
+      contents: read
+
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      # SonarCloud keys the project as <organization>_<repo-name>. Adjust if the
+      # repo name differs from the project name, or drop this job if the project
+      # is not on SonarCloud.
+      SONAR_PROJECT_KEY: farooq-teqniqly_TaskFlow
+      SONAR_ORGANIZATION: farooq-teqniqly
+      # Coverage-only exclusions: these files are still analyzed for issues, they just
+      # do not count toward the coverage metric. All .js is excluded (not only
+      # wwwroot/js/) because the JavaScript in a .NET app is browser-delivered --
+      # Blazor's service-worker glue, Bootstrap, and similar -- and no .NET test can
+      # execute it. A narrower wwwroot/js/ pattern misses files that sit at the
+      # wwwroot root, such as service-worker.published.js.
+      SONAR_EXCLUSIONS: "**/*.Tests/**,**/*.ArchitectureTests/**,**/TaskFlow.AppHost/**,**/samples/**,**/*.py,**/Scripts/*.sql,**/*.js"
+      # Optional: comma-separated globs removed from analysis entirely (unlike the
+      # coverage-only list above). Set for repos with non-app HTML/docs that Sonar's
+      # web analyzer would otherwise scan, e.g. "docs/**,**/*.html". Empty = none.
+      SONAR_ANALYSIS_EXCLUSIONS: ""
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Validate SONAR_TOKEN
+        run: |
+          if [ -z "${SONAR_TOKEN}" ]; then
+            echo "SONAR_TOKEN secret is not set; configure it in repository secrets." >&2
+            exit 1
+          fi
+
+      - name: Cache SonarQube packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-sonar
+          restore-keys: ${{ runner.os }}-sonar
+
+      - name: Install SonarQube Scanner
+        run: dotnet tool install --global dotnet-sonarscanner --version 11.2.1
+
+      - name: Restore dependencies
+        run: dotnet restore "TaskFlow.slnx"
+
+      - name: Begin SonarQube analysis
+        run: |
+          # Pass sonar.exclusions only when set: an empty value is not the same as
+          # omitting it and could override scanner-managed exclusions.
+          set --
+          if [ -n "${SONAR_ANALYSIS_EXCLUSIONS}" ]; then
+            set -- "/d:sonar.exclusions=${SONAR_ANALYSIS_EXCLUSIONS}"
+          fi
+          dotnet sonarscanner begin             /k:"${{env.SONAR_PROJECT_KEY}}"             /o:"${{env.SONAR_ORGANIZATION}}"             /d:sonar.token="${{env.SONAR_TOKEN}}"             /d:sonar.host.url="https://sonarcloud.io"             /d:sonar.cs.cobertura.reportsPaths="**/coverage.cobertura.xml"             /d:sonar.security.enableProjectScan=true             /d:sonar.qualitygate.wait=true             /d:sonar.coverage.exclusions="${{env.SONAR_EXCLUSIONS}}"             "$@"
+
+      - name: Build solution
+        run: dotnet build "TaskFlow.slnx" --configuration Release --no-restore
+
+      - name: Run tests with coverage
+        run: |
+          dotnet test "TaskFlow.slnx" --configuration Release --no-build \
+            --collect:"XPlat Code Coverage" --settings coverlet.runsettings
+
+      - name: End SonarQube analysis
+        run: dotnet sonarscanner end /d:sonar.token="${{env.SONAR_TOKEN}}"

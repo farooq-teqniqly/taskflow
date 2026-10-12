@@ -1,0 +1,16 @@
+<Solution>
+    <Folder Name="/src/">
+        <Project Path="src/TaskFlow.AppHost/TaskFlow.AppHost.csproj" />
+        <Project Path="src/TaskFlow.Application/TaskFlow.Application.csproj" />
+        <Project Path="src/TaskFlow.Blazor/TaskFlow.Blazor.csproj" />
+        <Project Path="src/TaskFlow.Domain/TaskFlow.Domain.csproj" />
+        <Project Path="src/TaskFlow.Infrastructure/TaskFlow.Infrastructure.csproj" />
+    </Folder>
+    <Folder Name="/tests/">
+        <Project Path="tests/TaskFlow.Application.Tests/TaskFlow.Application.Tests.csproj" />
+        <Project Path="tests/TaskFlow.ArchitectureTests/TaskFlow.ArchitectureTests.csproj" />
+        <Project Path="tests/TaskFlow.Blazor.Tests/TaskFlow.Blazor.Tests.csproj" />
+        <Project Path="tests/TaskFlow.Domain.Tests/TaskFlow.Domain.Tests.csproj" />
+        <Project Path="tests/TaskFlow.Infrastructure.Tests/TaskFlow.Infrastructure.Tests.csproj" />
+    </Folder>
+</Solution>
