@@ -8,4 +8,7 @@
     <!-- ASPIRE010: the Aspire CLI is not required; `dotnet run` is the supported path. -->
     <NoWarn>$(NoWarn);ASPIRE010</NoWarn>
   </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\TaskFlow.Blazor\TaskFlow.Blazor.csproj" />
+  </ItemGroup>
 </Project>
